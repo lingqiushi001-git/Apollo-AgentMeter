@@ -153,13 +153,18 @@ final class QuotaStore: ObservableObject {
     }
 
     private func refreshCountdownsOnly() {
-        let cx = self.scanCodex()
-        let (agCards, gm5h, gmWeek) = self.scanAntigravityQuotaCache()
-        self.codexCard = cx
-        self.antigravityCards = agCards
-        self.geminiShortRem = gm5h
-        self.geminiWeekRem = gmWeek
-        self.onUpdate?()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let cx = self.scanCodex()
+            let (agCards, gm5h, gmWeek) = self.scanAntigravityQuotaCache()
+            DispatchQueue.main.async {
+                if self.codexCard != cx { self.codexCard = cx }
+                if self.antigravityCards != agCards { self.antigravityCards = agCards }
+                self.geminiShortRem = gm5h
+                self.geminiWeekRem = gmWeek
+                self.onUpdate?()
+            }
+        }
     }
 
     func refreshAll() {
