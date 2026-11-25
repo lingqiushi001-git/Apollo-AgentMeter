@@ -198,108 +198,264 @@ final class QuotaStore: ObservableObject {
         return dir
     }
 
-    /// Auto-discovers a running Antigravity `language_server_macos_*` process on the local machine
-    /// and extracts `--csrf_token` + active listening HTTP port so AgentMeter works out-of-the-box on any Mac.
-    private func discoverLiveLanguageServerConnection() -> (address: String, token: String)? {
-        let baseDir = Self.appCacheDirectory
-        let connPath = "\(baseDir)/ls_conn.json"
+    private struct LanguageServerCandidate: Hashable {
+        let address: String
+        let token: String
+    }
 
-        // 1. Inspect running language_server_macos process via `ps` and `lsof`
-        let psTask = Process()
-        psTask.executableURL = URL(fileURLWithPath: "/bin/ps")
-        psTask.arguments = ["-ax", "-o", "pid=,command="]
-        let psPipe = Pipe()
-        psTask.standardOutput = psPipe
-        psTask.standardError = Pipe()
-        if (try? psTask.run()) != nil {
-            psTask.waitUntilExit()
-            let out = String(data: psPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            for line in out.split(separator: "\n") {
-                let s = String(line)
-                guard s.contains("language_server_macos"), s.contains("--csrf_token") else { continue }
-                let parts = s.trimmingCharacters(in: .whitespaces).split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-                guard let pid = parts.first else { continue }
-                var token: String? = nil
-                for i in 0..<(parts.count - 1) {
-                    if parts[i] == "--csrf_token" {
-                        token = parts[i + 1]
-                        break
-                    }
-                }
-                guard let csrf = token, !csrf.isEmpty else { continue }
+    private func isProcessAlive(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if Darwin.kill(pid, 0) == 0 { return true }
+        return errno == EPERM
+    }
 
-                // Find listening localhost TCP ports for this PID
-                let lsofTask = Process()
-                lsofTask.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-                lsofTask.arguments = ["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", pid]
-                let lsofPipe = Pipe()
-                lsofTask.standardOutput = lsofPipe
-                lsofTask.standardError = Pipe()
-                if (try? lsofTask.run()) != nil {
-                    lsofTask.waitUntilExit()
-                    let lsofOut = String(data: lsofPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    for lline in lsofOut.split(separator: "\n") {
-                        let ls = String(lline)
-                        if let r = ls.range(of: "127\\.0\\.0\\.1:\\d+", options: .regularExpression) {
-                            let addr = String(ls[r])
-                            // Persist discovered connection for quick access
-                            try? FileManager.default.createDirectory(atPath: baseDir, withIntermediateDirectories: true)
-                            let obj: [String: Any] = ["address": addr, "token": csrf]
-                            if let d = try? JSONSerialization.data(withJSONObject: obj) {
-                                try? d.write(to: URL(fileURLWithPath: connPath), options: .atomic)
-                            }
-                            return (addr, csrf)
-                        }
-                    }
-                }
+    private func extractFlagValue(_ flag: String, from command: String) -> String? {
+        let prefix = "\(flag)="
+        let tokens = command.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        for i in 0..<tokens.count {
+            if tokens[i] == flag, i + 1 < tokens.count {
+                let val = tokens[i + 1]
+                if !val.hasPrefix("-") { return val }
+            } else if tokens[i].hasPrefix(prefix) {
+                let val = String(tokens[i].dropFirst(prefix.count))
+                if !val.isEmpty { return val }
             }
-        }
-
-        // 2. Fallback to cached ls_conn.json if present
-        if let connData = try? Data(contentsOf: URL(fileURLWithPath: connPath)),
-           let conn = try? JSONSerialization.jsonObject(with: connData) as? [String: Any],
-           let address = conn["address"] as? String, !address.isEmpty,
-           let token = conn["token"] as? String, !token.isEmpty {
-            return (address, token)
         }
         return nil
     }
 
-    /// Queries the local Antigravity Language Server and updates `quota_summary_cache.json` atomically.
+    private func runCommandOutput(executable: String, arguments: [String]) -> String {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: executable)
+        task.arguments = arguments
+        let outPipe = Pipe()
+        task.standardOutput = outPipe
+        task.standardError = FileHandle.nullDevice
+        guard (try? task.run()) != nil else { return "" }
+        // Read stdout BEFORE waitUntilExit to avoid pipe buffer deadlocks when output > 64KB
+        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    private func listRunningProcesses() -> [(pid: String, command: String)] {
+        let out = runCommandOutput(executable: "/bin/ps", arguments: ["-ax", "-o", "pid=,command="])
+        var result: [(pid: String, command: String)] = []
+        for rawLine in out.split(separator: "\n") {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            guard let spaceIdx = trimmed.firstIndex(where: { $0.isWhitespace }) else { continue }
+            let pid = String(trimmed[..<spaceIdx])
+            let command = trimmed[spaceIdx...].trimmingCharacters(in: .whitespaces)
+            if !pid.isEmpty && !command.isEmpty {
+                result.append((pid, command))
+            }
+        }
+        return result
+    }
+
+    private func isAntigravityLanguageServerCommand(_ command: String) -> Bool {
+        let execPart: String
+        if let flagRange = command.range(of: " -") {
+            execPart = String(command[..<flagRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+        } else {
+            execPart = command.trimmingCharacters(in: .whitespaces)
+        }
+        let execName = URL(fileURLWithPath: execPart).lastPathComponent
+        let isLanguageServerBinary = (execName == "language_server") || execName.hasPrefix("language_server_")
+        guard isLanguageServerBinary else { return false }
+        return command.localizedCaseInsensitiveContains("antigravity") || execName.hasPrefix("language_server_macos")
+    }
+
+    private func discoverDaemonCandidates(extraAppDataDirs: [String]) -> [LanguageServerCandidate] {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+        let geminiRoot = "\(home)/.gemini"
+
+        var daemonDirs: [String] = []
+        var seenDirs = Set<String>()
+        func addDaemonDir(_ path: String) {
+            let std = URL(fileURLWithPath: path).standardizedFileURL.path
+            guard !seenDirs.contains(std) else { return }
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: std, isDirectory: &isDir), isDir.boolValue {
+                seenDirs.insert(std)
+                daemonDirs.append(std)
+            }
+        }
+
+        // Default Antigravity app_data_dir first
+        addDaemonDir("\(geminiRoot)/antigravity/daemon")
+
+        // Dynamically include any --app_data_dir seen on running language_server processes
+        for dir in extraAppDataDirs {
+            if dir.hasPrefix("/") {
+                addDaemonDir("\(dir)/daemon")
+            } else {
+                addDaemonDir("\(geminiRoot)/\(dir)/daemon")
+            }
+        }
+
+        // Also scan any sibling ~/.gemini/*/daemon directory for future/custom channels
+        if let entries = try? fm.contentsOfDirectory(atPath: geminiRoot) {
+            for entry in entries {
+                addDaemonDir("\(geminiRoot)/\(entry)/daemon")
+            }
+        }
+
+        var discovered: [(mtime: Date, candidate: LanguageServerCandidate)] = []
+        for dir in daemonDirs {
+            guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+            for file in files where file.hasSuffix(".json") {
+                let fullPath = "\(dir)/\(file)"
+                guard let data = try? Data(contentsOf: URL(fileURLWithPath: fullPath)),
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let token = json["csrfToken"] as? String, !token.isEmpty else { continue }
+
+                if let pidNum = json["pid"] as? NSNumber {
+                    let pid = pidNum.int32Value
+                    if pid > 0 && !isProcessAlive(pid) {
+                        continue
+                    }
+                }
+
+                let mtime = (try? fm.attributesOfItem(atPath: fullPath)[.modificationDate] as? Date) ?? .distantPast
+                if let httpPort = (json["httpPort"] as? NSNumber)?.intValue, httpPort > 0 {
+                    discovered.append((mtime, LanguageServerCandidate(address: "127.0.0.1:\(httpPort)", token: token)))
+                }
+            }
+        }
+
+        discovered.sort { $0.mtime > $1.mtime }
+        return discovered.map { $0.candidate }
+    }
+
+    private func discoverProcessCandidates(from processes: [(pid: String, command: String)]) -> [LanguageServerCandidate] {
+        var candidates: [LanguageServerCandidate] = []
+        for proc in processes {
+            guard isAntigravityLanguageServerCommand(proc.command),
+                  let csrf = extractFlagValue("--csrf_token", from: proc.command),
+                  !csrf.isEmpty else { continue }
+
+            let lsofOut = runCommandOutput(
+                executable: "/usr/sbin/lsof",
+                arguments: ["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", proc.pid]
+            )
+            for lline in lsofOut.split(separator: "\n") {
+                let ls = String(lline)
+                if let r = ls.range(of: "(?:127\\.0\\.0\\.1|localhost):\\d+", options: .regularExpression) {
+                    candidates.append(LanguageServerCandidate(address: String(ls[r]), token: csrf))
+                }
+            }
+        }
+        return candidates
+    }
+
+    /// Auto-discovers candidate local Antigravity Language Server endpoints across versions (2.x daemon JSON & legacy CLI)
+    /// without relying on any machine-specific paths, ports, or binary names.
+    private func discoverLiveLanguageServerCandidates() -> [LanguageServerCandidate] {
+        var ordered: [LanguageServerCandidate] = []
+        var seen = Set<LanguageServerCandidate>()
+        func appendUnique(_ c: LanguageServerCandidate) {
+            guard !c.address.isEmpty, !c.token.isEmpty, !seen.contains(c) else { return }
+            seen.insert(c)
+            ordered.append(c)
+        }
+
+        // 1. Optional environment overrides
+        let env = ProcessInfo.processInfo.environment
+        if let addr = env["ANTIGRAVITY_LS_ADDRESS"], !addr.isEmpty,
+           let token = env["ANTIGRAVITY_CSRF_TOKEN"], !token.isEmpty {
+            appendUnique(LanguageServerCandidate(address: addr, token: token))
+        }
+
+        // 2. Inspect running processes once to discover custom --app_data_dir and legacy CLI tokens
+        let processes = listRunningProcesses()
+        var extraAppDataDirs: [String] = []
+        for proc in processes where isAntigravityLanguageServerCommand(proc.command) {
+            if let appDataDir = extractFlagValue("--app_data_dir", from: proc.command), !appDataDir.isEmpty {
+                extraAppDataDirs.append(appDataDir)
+            }
+        }
+
+        // 3. Antigravity 2.x+ daemon metadata files (~/.gemini/<app_data_dir>/daemon/*.json)
+        for c in discoverDaemonCandidates(extraAppDataDirs: extraAppDataDirs) {
+            appendUnique(c)
+        }
+
+        // 4. Legacy Antigravity process CLI (--csrf_token) + lsof listening ports
+        for c in discoverProcessCandidates(from: processes) {
+            appendUnique(c)
+        }
+
+        // 5. Fallback to cached ls_conn.json if present
+        let connPath = "\(Self.appCacheDirectory)/ls_conn.json"
+        if let connData = try? Data(contentsOf: URL(fileURLWithPath: connPath)),
+           let conn = try? JSONSerialization.jsonObject(with: connData) as? [String: Any],
+           let address = conn["address"] as? String, !address.isEmpty,
+           let token = conn["token"] as? String, !token.isEmpty {
+            appendUnique(LanguageServerCandidate(address: address, token: token))
+        }
+
+        return ordered
+    }
+
+    /// Queries candidate local Antigravity Language Server endpoints and updates `quota_summary_cache.json` atomically.
     private func fetchLiveAntigravityQuotaIfPossible() {
         let baseDir = Self.appCacheDirectory
         let cachePath = "\(baseDir)/quota_summary_cache.json"
+        let connPath = "\(baseDir)/ls_conn.json"
 
-        guard let (address, token) = discoverLiveLanguageServerConnection(),
-              let url = URL(string: "http://\(address)/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary") else {
-            return
-        }
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.connectionProxyDictionary = [:]
+        sessionConfig.timeoutIntervalForRequest = 3.0
+        sessionConfig.timeoutIntervalForResource = 3.5
+        let session = URLSession(configuration: sessionConfig)
+        defer { session.invalidateAndCancel() }
 
-        var req = URLRequest(url: url, timeoutInterval: 4.0)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue(token, forHTTPHeaderField: "x-codeium-csrf-token")
-        req.httpBody = Data("{}".utf8)
+        let candidates = discoverLiveLanguageServerCandidates()
+        for candidate in candidates {
+            guard let url = URL(string: "http://\(candidate.address)/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary") else {
+                continue
+            }
 
-        let sem = DispatchSemaphore(value: 0)
-        URLSession.shared.dataTask(with: req) { data, resp, _ in
-            defer { sem.signal() }
-            guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
-                  let data = data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let responseObj = json["response"] as? [String: Any],
-                  responseObj["groups"] is [[String: Any]] else {
+            var req = URLRequest(url: url, timeoutInterval: 3.0)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("1", forHTTPHeaderField: "Connect-Protocol-Version")
+            req.setValue(candidate.token, forHTTPHeaderField: "x-antigravity-csrf-token")
+            req.setValue(candidate.token, forHTTPHeaderField: "x-codeium-csrf-token")
+            req.httpBody = Data("{}".utf8)
+
+            var succeeded = false
+            let sem = DispatchSemaphore(value: 0)
+            session.dataTask(with: req) { data, resp, _ in
+                defer { sem.signal() }
+                guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                      let data = data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let responseObj = json["response"] as? [String: Any],
+                      responseObj["groups"] is [[String: Any]] else {
+                    return
+                }
+                let wrapper: [String: Any] = [
+                    "updatedAt": ISO8601DateFormatter().string(from: Date()),
+                    "response": responseObj
+                ]
+                if let outData = try? JSONSerialization.data(withJSONObject: wrapper) {
+                    try? outData.write(to: URL(fileURLWithPath: cachePath), options: .atomic)
+                }
+                let connObj: [String: Any] = ["address": candidate.address, "token": candidate.token]
+                if let connData = try? JSONSerialization.data(withJSONObject: connObj) {
+                    try? connData.write(to: URL(fileURLWithPath: connPath), options: .atomic)
+                }
+                succeeded = true
+            }.resume()
+            _ = sem.wait(timeout: .now() + 3.5)
+
+            if succeeded {
                 return
             }
-            let wrapper: [String: Any] = [
-                "updatedAt": ISO8601DateFormatter().string(from: Date()),
-                "response": responseObj
-            ]
-            if let outData = try? JSONSerialization.data(withJSONObject: wrapper) {
-                try? outData.write(to: URL(fileURLWithPath: cachePath), options: .atomic)
-            }
-        }.resume()
-        _ = sem.wait(timeout: .now() + 4.5)
+        }
     }
 
     // 1. Codex from ~/.codex/sessions/

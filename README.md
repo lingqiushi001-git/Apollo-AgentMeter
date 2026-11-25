@@ -13,7 +13,7 @@
 - **零打扰交互**：启动后默认静默折叠于状态栏，**仅当主动点击状态栏条目时才展开悬浮卡片**，再次点击或点击 `−` 即收起。
 - **开箱即用自动发现**：
   - 自动读取本地 `~/.codex/sessions` 最新会话速率限制与重置时间戳，过期自动回满；
-  - 自动发现本机运行中的 Antigravity `language_server_macos` 进程，动态提取端口与令牌拉取最新模型分组额度（`Gemini 模型`、`Claude / GPT 模型`、`Gemini 4 Argon`）。
+  - 自动发现本机运行中的 Antigravity Language Server（支持 Antigravity 2.x `~/.gemini/*/daemon/*.json` 元数据自动发现与旧版进程参数/端口兜底，自动绕过本地代理），动态拉取最新模型分组额度（`Gemini 模型`、`Claude / GPT 模型`、`Gemini 4 Argon`）。
 - **三色健康度仪表**：
   - 🟢 **翠绿 (`<60%` 已用)**：额度充裕
   - 🟡 **琥珀黄 (`60%–80%` 已用)**：中度消耗预警
