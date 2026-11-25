@@ -25,7 +25,7 @@
 ## 📦 安装方式 (Installation)
 
 ### 方式一：通过 Releases DMG 安装（推荐）
-1. 在 [Releases](../../releases) 页面下载最新的 **`Apollo-AgentMeter-1.0.0.dmg`**。
+1. 在 [Releases](../../releases) 页面下载最新的 **`Apollo-AgentMeter-1.0.1.dmg`**。
 2. 双击挂载 DMG 镜像，将 **`AgentMeter.app`**（显示为 **Apollo AgentMeter**）拖入 **`Applications`** 文件夹。
 3. 从「应用程序」或 Spotlight 启动即可。
 
