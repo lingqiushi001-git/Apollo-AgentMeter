@@ -30,50 +30,36 @@ struct QuotaCardModel: Equatable, Identifiable {
     }
 }
 
-// MARK: - High-Contrast Theme Palette
+// MARK: - Glass Ledger Theme Palette
 
 struct ThemePalette {
     let isDark: Bool
 
-    var windowBg: Color {
-        isDark ? Color(red: 0.06, green: 0.08, blue: 0.12) : Color(red: 0.96, green: 0.97, blue: 0.99)
-    }
-    var cardBg: Color {
-        isDark ? Color(red: 0.11, green: 0.14, blue: 0.20) : Color.white
-    }
-    var cardBorder: Color {
-        isDark ? Color(red: 0.20, green: 0.25, blue: 0.35) : Color(red: 0.82, green: 0.86, blue: 0.91)
+    var hudTint: Color { snapshotBg.opacity(isDark ? 0.84 : 0.86) }
+    var snapshotBg: Color {
+        isDark ? Color(red: 0.098, green: 0.106, blue: 0.125) : Color(red: 0.973, green: 0.976, blue: 0.984)
     }
     var primaryText: Color {
-        isDark ? Color(red: 0.97, green: 0.98, blue: 1.00) : Color(red: 0.06, green: 0.09, blue: 0.16)
+        isDark ? Color(red: 0.957, green: 0.961, blue: 0.969) : Color(red: 0.094, green: 0.106, blue: 0.125)
     }
     var secondaryText: Color {
-        isDark ? Color(red: 0.78, green: 0.83, blue: 0.90) : Color(red: 0.28, green: 0.35, blue: 0.44)
+        isDark ? Color(red: 0.631, green: 0.655, blue: 0.702) : Color(red: 0.322, green: 0.349, blue: 0.396)
     }
     var mutedText: Color {
-        isDark ? Color(red: 0.58, green: 0.65, blue: 0.75) : Color(red: 0.45, green: 0.51, blue: 0.60)
-    }
-    var trackBg: Color {
-        isDark ? Color(red: 0.18, green: 0.22, blue: 0.31) : Color(red: 0.88, green: 0.91, blue: 0.95)
-    }
-    var divider: Color {
-        isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.08)
-    }
-    var chipBg: Color {
-        isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.06)
-    }
-    var accentBlue: Color {
-        isDark ? Color(red: 0.38, green: 0.68, blue: 1.00) : Color(red: 0.12, green: 0.42, blue: 0.92)
+        isDark ? Color(red: 0.443, green: 0.471, blue: 0.525) : Color(red: 0.482, green: 0.514, blue: 0.569)
     }
     var okColor: Color {
-        isDark ? Color(red: 0.20, green: 0.85, blue: 0.52) : Color(red: 0.06, green: 0.62, blue: 0.35)
+        isDark ? Color(red: 0.165, green: 0.616, blue: 0.561) : Color(red: 0.118, green: 0.510, blue: 0.463)
     }
     var warnColor: Color {
-        isDark ? Color(red: 0.99, green: 0.73, blue: 0.20) : Color(red: 0.82, green: 0.48, blue: 0.02)
+        isDark ? Color(red: 0.878, green: 0.541, blue: 0.118) : Color(red: 0.706, green: 0.325, blue: 0.035)
     }
     var dangerColor: Color {
-        isDark ? Color(red: 1.00, green: 0.36, blue: 0.38) : Color(red: 0.84, green: 0.14, blue: 0.18)
+        isDark ? Color(red: 0.878, green: 0.310, blue: 0.310) : Color(red: 0.784, green: 0.118, blue: 0.118)
     }
+    var hairline: Color { (isDark ? Color.white : Color.black).opacity(0.085) }
+    var trackBg: Color { isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.08) }
+    var chipBg: Color { isDark ? Color.white.opacity(0.075) : Color.black.opacity(0.055) }
 
     func statusColor(usedInt: Int) -> Color {
         if usedInt > 80 { return dangerColor }
@@ -113,6 +99,46 @@ func fmtClockTime(_ date: Date?) -> String {
     return f.string(from: d)
 }
 
+private func number(_ value: Any?) -> Double? {
+    let n = (value as? NSNumber)?.doubleValue ?? (value as? String).flatMap(Double.init)
+    return n.flatMap { $0.isFinite ? $0 : nil }
+}
+
+func parseQuotaTimestamp(_ raw: Any?) -> Date? {
+    if let s = raw as? String { return parseISO(s) }
+    if let obj = raw as? [String: Any], let seconds = number(obj["seconds"]) {
+        return Date(timeIntervalSince1970: seconds + (number(obj["nanos"]) ?? 0) / 1e9)
+    }
+    return number(raw).map { Date(timeIntervalSince1970: $0 > 1e11 ? $0 / 1000 : $0) }
+}
+
+func parseRemainingFraction(_ bucket: [String: Any]) -> Double? {
+    let nested = bucket["remaining"] as? [String: Any]
+    let fraction = number(bucket["remainingFraction"]) ??
+        (nested?["case"] as? String == "remainingFraction" ? number(nested?["value"]) : nil)
+    if let fraction { return min(1, max(0, fraction)) }
+    return bucket["resetTime"] != nil || bucket["description"] != nil ? 0 : nil
+}
+
+private final class LoopbackTLSDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let space = challenge.protectionSpace
+        if space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           ["127.0.0.1", "localhost", "::1"].contains(space.host),
+           let trust = space.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
 // MARK: - Store (5-Minute Auto Refresh + Instant Manual Live Refresh)
 
 final class QuotaStore: ObservableObject {
@@ -127,6 +153,7 @@ final class QuotaStore: ObservableObject {
     @Published var isRefreshing: Bool = false
     @Published var isDarkTheme: Bool {
         didSet {
+            guard persistsTheme else { return }
             UserDefaults.standard.set(isDarkTheme, forKey: "agentmeter_dark_theme")
         }
     }
@@ -135,12 +162,21 @@ final class QuotaStore: ObservableObject {
     private var timer: Timer?
     private var countdownTimer: Timer?
 
-    init() {
+    @Published var antigravityStaleNotice: String?
+    private let scanQueue = DispatchQueue(label: "agentmeter.quota", qos: .userInitiated)
+    private var lastAntigravityLive = false
+    private var lastAntigravityFailureReason: String?
+
+    private let persistsTheme: Bool
+
+    init(startTimers: Bool = true) {
+        persistsTheme = startTimers
         if UserDefaults.standard.object(forKey: "agentmeter_dark_theme") == nil {
             self.isDarkTheme = true
         } else {
             self.isDarkTheme = UserDefaults.standard.bool(forKey: "agentmeter_dark_theme")
         }
+        guard startTimers else { return }
         refreshAll()
         // Auto-refresh quota data every 5 minutes (300 seconds)
         timer = Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
@@ -153,40 +189,36 @@ final class QuotaStore: ObservableObject {
     }
 
     private func refreshCountdownsOnly() {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self = self else { return }
-            let cx = self.scanCodex()
-            let (agCards, gm5h, gmWeek) = self.scanAntigravityQuotaCache()
-            DispatchQueue.main.async {
-                if self.codexCard != cx { self.codexCard = cx }
-                if self.antigravityCards != agCards { self.antigravityCards = agCards }
-                self.geminiShortRem = gm5h
-                self.geminiWeekRem = gmWeek
-                self.onUpdate?()
-            }
-        }
+        scanQueue.async { self.scanAndPublish(refreshed: false) }
     }
 
     func refreshAll() {
-        DispatchQueue.main.async {
-            self.isRefreshing = true
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        scanQueue.async {
+            let result = self.fetchLiveAntigravityQuotaIfPossible(forceRefresh: true)
+            self.lastAntigravityLive = result.succeeded
+            self.lastAntigravityFailureReason = result.failureReason
+            self.scanAndPublish(refreshed: true)
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            // 1. Try live fetch from Antigravity Language Server first so data is 100% up-to-date
-            self.fetchLiveAntigravityQuotaIfPossible()
-            // 2. Scan Codex local logs & updated Antigravity quota cache
-            let cx = self.scanCodex()
-            let (agCards, gm5h, gmWeek) = self.scanAntigravityQuotaCache()
-            DispatchQueue.main.async {
-                self.codexCard = cx
-                self.antigravityCards = agCards
-                self.geminiShortRem = gm5h
-                self.geminiWeekRem = gmWeek
+    }
+
+    private func scanAndPublish(refreshed: Bool) {
+        let cx = scanCodex()
+        let (cards, short, week, notice) = scanAntigravityQuotaCache(
+            isLive: lastAntigravityLive, failureReason: lastAntigravityFailureReason)
+        DispatchQueue.main.async {
+            self.codexCard = cx
+            self.antigravityCards = cards
+            self.geminiShortRem = short
+            self.geminiWeekRem = week
+            self.antigravityStaleNotice = notice
+            if refreshed {
                 self.lastRefresh = Date()
                 self.isRefreshing = false
-                self.onUpdate?()
             }
+            self.onUpdate?()
         }
     }
 
@@ -199,8 +231,25 @@ final class QuotaStore: ObservableObject {
     }
 
     private struct LanguageServerCandidate: Hashable {
+        let scheme: String
         let address: String
-        let token: String
+        let token: String?
+        let source: String
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.scheme == rhs.scheme && lhs.address == rhs.address && (lhs.token ?? "") == (rhs.token ?? "")
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(scheme)
+            hasher.combine(address)
+            hasher.combine(token ?? "")
+        }
+    }
+
+    private func cleanToken(_ raw: String?) -> String? {
+        guard let token = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else { return nil }
+        return token
     }
 
     private func isProcessAlive(_ pid: Int32) -> Bool {
@@ -209,9 +258,8 @@ final class QuotaStore: ObservableObject {
         return errno == EPERM
     }
 
-    private func extractFlagValue(_ flag: String, from command: String) -> String? {
+    private func extractFlagValue(_ flag: String, from tokens: [String]) -> String? {
         let prefix = "\(flag)="
-        let tokens = command.split(whereSeparator: { $0.isWhitespace }).map(String.init)
         for i in 0..<tokens.count {
             if tokens[i] == flag, i + 1 < tokens.count {
                 let val = tokens[i + 1]
@@ -238,32 +286,51 @@ final class QuotaStore: ObservableObject {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
-    private func listRunningProcesses() -> [(pid: String, command: String)] {
-        let out = runCommandOutput(executable: "/bin/ps", arguments: ["-ax", "-o", "pid=,command="])
-        var result: [(pid: String, command: String)] = []
-        for rawLine in out.split(separator: "\n") {
-            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
-            guard let spaceIdx = trimmed.firstIndex(where: { $0.isWhitespace }) else { continue }
-            let pid = String(trimmed[..<spaceIdx])
-            let command = trimmed[spaceIdx...].trimmingCharacters(in: .whitespaces)
-            if !pid.isEmpty && !command.isEmpty {
-                result.append((pid, command))
-            }
-        }
-        return result
+    private struct ServerProcess {
+        let pid: String
+        let args: [String]
+        let isACP: Bool
     }
 
-    private func isAntigravityLanguageServerCommand(_ command: String) -> Bool {
-        let execPart: String
-        if let flagRange = command.range(of: " -") {
-            execPart = String(command[..<flagRange.lowerBound]).trimmingCharacters(in: .whitespaces)
-        } else {
-            execPart = command.trimmingCharacters(in: .whitespaces)
+    // ps flattens argv boundaries. Read the kernel argv for matching process names.
+    private func arguments(pid: Int32) -> [String] {
+        var mib = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return [] }
+        var bytes = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &bytes, &size, nil, 0) == 0 else { return [] }
+        let count = bytes.withUnsafeBytes { Int($0.loadUnaligned(as: Int32.self)) }
+        guard count > 0, let end = bytes[4..<size].firstIndex(of: 0) else { return [] }
+        var pos = end
+        while pos < size && bytes[pos] == 0 { pos += 1 }
+        var args: [String] = []
+        while pos < size && args.count < count, let next = bytes[pos..<size].firstIndex(of: 0) {
+            args.append(String(decoding: bytes[pos..<next], as: UTF8.self))
+            pos = next + 1
         }
-        let execName = URL(fileURLWithPath: execPart).lastPathComponent
-        let isLanguageServerBinary = (execName == "language_server") || execName.hasPrefix("language_server_")
-        guard isLanguageServerBinary else { return false }
-        return command.localizedCaseInsensitiveContains("antigravity") || execName.hasPrefix("language_server_macos")
+        return args
+    }
+
+    private func isAntigravityACPCommand(_ args: [String]) -> Bool {
+        guard args.count >= 2, args[1] == "acp" else { return false }
+        let name = URL(fileURLWithPath: args[0]).lastPathComponent
+        return name == "antigravity" || name.hasPrefix("antigravity-")
+    }
+
+    private func listRunningProcesses() -> [ServerProcess] {
+        let output = runCommandOutput(executable: "/bin/ps", arguments: ["-axww", "-o", "pid=,comm="])
+        return output.split(separator: "\n").compactMap { line in
+            guard line.contains("antigravity") || line.contains("language_server"),
+                  let pid = line.split(whereSeparator: { $0.isWhitespace }).first.flatMap({ Int32($0) }) else { return nil }
+            let args = arguments(pid: pid)
+            guard let executable = args.first else { return nil }
+            let name = URL(fileURLWithPath: executable).lastPathComponent
+            let acp = isAntigravityACPCommand(args)
+            let legacy = (name == "language_server" || name.hasPrefix("language_server_")) &&
+                (name.hasPrefix("language_server_macos") || args.contains { $0.localizedCaseInsensitiveContains("antigravity") })
+            guard acp || legacy else { return nil }
+            return ServerProcess(pid: String(pid), args: args, isACP: acp)
+        }
     }
 
     private func discoverDaemonCandidates(extraAppDataDirs: [String]) -> [LanguageServerCandidate] {
@@ -308,8 +375,8 @@ final class QuotaStore: ObservableObject {
             for file in files where file.hasSuffix(".json") {
                 let fullPath = "\(dir)/\(file)"
                 guard let data = try? Data(contentsOf: URL(fileURLWithPath: fullPath)),
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let token = json["csrfToken"] as? String, !token.isEmpty else { continue }
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                let token = cleanToken(json["csrfToken"] as? String)
 
                 if let pidNum = json["pid"] as? NSNumber {
                     let pid = pidNum.int32Value
@@ -319,143 +386,167 @@ final class QuotaStore: ObservableObject {
                 }
 
                 let mtime = (try? fm.attributesOfItem(atPath: fullPath)[.modificationDate] as? Date) ?? .distantPast
-                if let httpPort = (json["httpPort"] as? NSNumber)?.intValue, httpPort > 0 {
-                    discovered.append((mtime, LanguageServerCandidate(address: "127.0.0.1:\(httpPort)", token: token)))
+                for scheme in ["http", "https"] {
+                    if let port = json["\(scheme)Port"] as? Int, (1...65535).contains(port) {
+                        discovered.append((mtime, LanguageServerCandidate(scheme: scheme, address: "127.0.0.1:\(port)", token: token, source: "daemon")))
+                    }
                 }
             }
         }
-
-        discovered.sort { $0.mtime > $1.mtime }
+        discovered.sort { lhs, rhs in
+            if lhs.mtime != rhs.mtime { return lhs.mtime > rhs.mtime }
+            return lhs.candidate.scheme < rhs.candidate.scheme
+        }
         return discovered.map { $0.candidate }
     }
 
-    private func discoverProcessCandidates(from processes: [(pid: String, command: String)]) -> [LanguageServerCandidate] {
-        var candidates: [LanguageServerCandidate] = []
-        for proc in processes {
-            guard isAntigravityLanguageServerCommand(proc.command),
-                  let csrf = extractFlagValue("--csrf_token", from: proc.command),
-                  !csrf.isEmpty else { continue }
-
-            let lsofOut = runCommandOutput(
-                executable: "/usr/sbin/lsof",
-                arguments: ["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", proc.pid]
-            )
-            for lline in lsofOut.split(separator: "\n") {
-                let ls = String(lline)
-                if let r = ls.range(of: "(?:127\\.0\\.0\\.1|localhost):\\d+", options: .regularExpression) {
-                    candidates.append(LanguageServerCandidate(address: String(ls[r]), token: csrf))
+    private func listenerCandidates(_ processes: [ServerProcess], acp: Bool) -> [LanguageServerCandidate] {
+        var result: [LanguageServerCandidate] = []
+        for proc in processes where proc.isACP == acp {
+            let token = cleanToken(extractFlagValue("--csrf_token", from: proc.args))
+            guard acp || token != nil else { continue }
+            let output = runCommandOutput(executable: "/usr/sbin/lsof",
+                arguments: ["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", proc.pid, "-Fn"])
+            for line in output.split(separator: "\n") where line.hasPrefix("n") {
+                let address = String(line.dropFirst())
+                for scheme in ["http", "https"] {
+                    result.append(LanguageServerCandidate(scheme: scheme, address: address, token: token, source: acp ? "acp" : "language_server"))
                 }
             }
         }
-        return candidates
+        return result.sorted { $0.scheme < $1.scheme }
     }
 
-    /// Auto-discovers candidate local Antigravity Language Server endpoints across versions (2.x daemon JSON & legacy CLI)
-    /// without relying on any machine-specific paths, ports, or binary names.
     private func discoverLiveLanguageServerCandidates() -> [LanguageServerCandidate] {
         var ordered: [LanguageServerCandidate] = []
         var seen = Set<LanguageServerCandidate>()
-        func appendUnique(_ c: LanguageServerCandidate) {
-            guard !c.address.isEmpty, !c.token.isEmpty, !seen.contains(c) else { return }
-            seen.insert(c)
+        func append(_ c: LanguageServerCandidate) {
+            guard ["http", "https"].contains(c.scheme),
+                  c.address.range(of: #"^(127\.0\.0\.1|localhost|\[::1\]):[0-9]{1,5}$"#, options: .regularExpression) != nil,
+                  let port = c.address.split(separator: ":").last.flatMap({ UInt16($0) }), port > 0,
+                  seen.insert(c).inserted else { return }
             ordered.append(c)
         }
 
-        // 1. Optional environment overrides
         let env = ProcessInfo.processInfo.environment
-        if let addr = env["ANTIGRAVITY_LS_ADDRESS"], !addr.isEmpty,
-           let token = env["ANTIGRAVITY_CSRF_TOKEN"], !token.isEmpty {
-            appendUnique(LanguageServerCandidate(address: addr, token: token))
-        }
-
-        // 2. Inspect running processes once to discover custom --app_data_dir and legacy CLI tokens
-        let processes = listRunningProcesses()
-        var extraAppDataDirs: [String] = []
-        for proc in processes where isAntigravityLanguageServerCommand(proc.command) {
-            if let appDataDir = extractFlagValue("--app_data_dir", from: proc.command), !appDataDir.isEmpty {
-                extraAppDataDirs.append(appDataDir)
+        if let address = env["ANTIGRAVITY_LS_ADDRESS"] {
+            let parts = address.components(separatedBy: "://")
+            let schemes = parts.count == 1 ? ["http", "https"] : [parts[0].lowercased()]
+            for scheme in schemes {
+                append(LanguageServerCandidate(scheme: scheme, address: parts.last ?? "", token: cleanToken(env["ANTIGRAVITY_CSRF_TOKEN"]), source: "env"))
             }
         }
-
-        // 3. Antigravity 2.x+ daemon metadata files (~/.gemini/<app_data_dir>/daemon/*.json)
-        for c in discoverDaemonCandidates(extraAppDataDirs: extraAppDataDirs) {
-            appendUnique(c)
+        let processes = listRunningProcesses()
+        let directories = processes.compactMap { proc -> String? in
+            func flag(_ name: String) -> String? {
+                extractFlagValue(name, from: proc.args) ?? extractFlagValue(name.replacingOccurrences(of: "_", with: "-"), from: proc.args)
+            }
+            guard let appDir = flag("--app_data_dir") else { return nil }
+            if !appDir.hasPrefix("/"), let root = flag("--gemini_dir") {
+                return URL(fileURLWithPath: root).appendingPathComponent(appDir).path
+            }
+            return appDir
         }
+        discoverDaemonCandidates(extraAppDataDirs: directories).forEach(append)
+        listenerCandidates(processes, acp: true).forEach(append)
+        listenerCandidates(processes, acp: false).forEach(append)
 
-        // 4. Legacy Antigravity process CLI (--csrf_token) + lsof listening ports
-        for c in discoverProcessCandidates(from: processes) {
-            appendUnique(c)
-        }
-
-        // 5. Fallback to cached ls_conn.json if present
         let connPath = "\(Self.appCacheDirectory)/ls_conn.json"
-        if let connData = try? Data(contentsOf: URL(fileURLWithPath: connPath)),
-           let conn = try? JSONSerialization.jsonObject(with: connData) as? [String: Any],
-           let address = conn["address"] as? String, !address.isEmpty,
-           let token = conn["token"] as? String, !token.isEmpty {
-            appendUnique(LanguageServerCandidate(address: address, token: token))
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: connPath)),
+           let conn = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let address = conn["address"] as? String {
+            append(LanguageServerCandidate(scheme: conn["scheme"] as? String ?? "http", address: address,
+                token: cleanToken(conn["token"] as? String), source: "cache"))
         }
-
         return ordered
     }
 
-    /// Queries candidate local Antigravity Language Server endpoints and updates `quota_summary_cache.json` atomically.
-    private func fetchLiveAntigravityQuotaIfPossible() {
-        let baseDir = Self.appCacheDirectory
-        let cachePath = "\(baseDir)/quota_summary_cache.json"
-        let connPath = "\(baseDir)/ls_conn.json"
+    private struct LiveFetchResult {
+        let candidates: [LanguageServerCandidate]
+        var winner: LanguageServerCandidate?
+        var attemptedCount = 0
+        var failureReason: String?
+        var succeeded: Bool { winner != nil }
+    }
 
-        let sessionConfig = URLSessionConfiguration.ephemeral
-        sessionConfig.connectionProxyDictionary = [:]
-        sessionConfig.timeoutIntervalForRequest = 3.0
-        sessionConfig.timeoutIntervalForResource = 3.5
-        let session = URLSession(configuration: sessionConfig)
+    private final class RPCReply: @unchecked Sendable {
+        var status = 0
+        var data = Data()
+    }
+
+    private func fetchLiveAntigravityQuotaIfPossible(forceRefresh: Bool) -> LiveFetchResult {
+        let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]
+        config.timeoutIntervalForRequest = 2
+        config.timeoutIntervalForResource = 2.5
+        let session = URLSession(configuration: config, delegate: LoopbackTLSDelegate(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
 
-        let candidates = discoverLiveLanguageServerCandidates()
-        for candidate in candidates {
-            guard let url = URL(string: "http://\(candidate.address)/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary") else {
-                continue
-            }
-
-            var req = URLRequest(url: url, timeoutInterval: 3.0)
+        var result = LiveFetchResult(candidates: discoverLiveLanguageServerCandidates())
+        var authFailed = false
+        for c in result.candidates {
+            guard let url = URL(string: "\(c.scheme)://\(c.address)/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary") else { continue }
+            result.attemptedCount += 1
+            var req = URLRequest(url: url)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.setValue("1", forHTTPHeaderField: "Connect-Protocol-Version")
-            req.setValue(candidate.token, forHTTPHeaderField: "x-antigravity-csrf-token")
-            req.setValue(candidate.token, forHTTPHeaderField: "x-codeium-csrf-token")
-            req.httpBody = Data("{}".utf8)
-
-            var succeeded = false
-            let sem = DispatchSemaphore(value: 0)
-            session.dataTask(with: req) { data, resp, _ in
-                defer { sem.signal() }
-                guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
-                      let data = data,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let responseObj = json["response"] as? [String: Any],
-                      responseObj["groups"] is [[String: Any]] else {
-                    return
+            if let token = c.token {
+                req.setValue(token, forHTTPHeaderField: "x-antigravity-csrf-token")
+                req.setValue(token, forHTTPHeaderField: "x-codeium-csrf-token")
+            }
+            for force in forceRefresh ? [true, false] : [false] {
+                req.httpBody = Data((force ? #"{"forceRefresh":true}"# : "{}").utf8)
+                let sem = DispatchSemaphore(value: 0)
+                let reply = RPCReply()
+                let task = session.dataTask(with: req) { data, response, _ in
+                    reply.status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    reply.data = data ?? Data()
+                    sem.signal()
                 }
-                let wrapper: [String: Any] = [
-                    "updatedAt": ISO8601DateFormatter().string(from: Date()),
-                    "response": responseObj
-                ]
-                if let outData = try? JSONSerialization.data(withJSONObject: wrapper) {
-                    try? outData.write(to: URL(fileURLWithPath: cachePath), options: .atomic)
-                }
-                let connObj: [String: Any] = ["address": candidate.address, "token": candidate.token]
-                if let connData = try? JSONSerialization.data(withJSONObject: connObj) {
-                    try? connData.write(to: URL(fileURLWithPath: connPath), options: .atomic)
-                }
-                succeeded = true
-            }.resume()
-            _ = sem.wait(timeout: .now() + 3.5)
-
-            if succeeded {
-                return
+                task.resume()
+                guard sem.wait(timeout: .now() + 2.5) == .success else { task.cancel(); break }
+                if force, [400, 422, 500].contains(reply.status),
+                   !String(decoding: reply.data, as: UTF8.self).localizedCaseInsensitiveContains("https") { continue }
+                if [401, 403].contains(reply.status) { authFailed = true }
+                guard reply.status == 200,
+                      let json = try? JSONSerialization.jsonObject(with: reply.data) as? [String: Any],
+                      let resp = json["response"] as? [String: Any], resp["groups"] is [[String: Any]] else { break }
+                let dir = URL(fileURLWithPath: Self.appCacheDirectory)
+                let wrapper: [String: Any] = ["updatedAt": ISO8601DateFormatter().string(from: Date()), "source": c.source, "response": resp]
+                var conn = ["scheme": c.scheme, "address": c.address]
+                conn["token"] = c.token
+                do {
+                    try JSONSerialization.data(withJSONObject: conn).write(to: dir.appendingPathComponent("ls_conn.json"), options: .atomic)
+                    try JSONSerialization.data(withJSONObject: wrapper).write(to: dir.appendingPathComponent("quota_summary_cache.json"), options: .atomic)
+                    result.winner = c
+                } catch { result.failureReason = "无法写入 Antigravity 本地缓存" }
+                return result
             }
         }
+        if result.candidates.isEmpty { result.failureReason = "未发现 Antigravity 进程或本地服务" }
+        else if authFailed { result.failureReason = "Antigravity 令牌认证失败（HTTP 401/403）" }
+        else { result.failureReason = "Antigravity 连接或额度接口失败（已尝试 \(result.attemptedCount) 个端点）" }
+        return result
+    }
+
+    func probe() -> Bool {
+        let result = fetchLiveAntigravityQuotaIfPossible(forceRefresh: true)
+        let (cards, short, week, notice) = scanAntigravityQuotaCache(isLive: result.succeeded, failureReason: result.failureReason)
+        let codex = scanCodex()
+        print("candidatesCount=\(result.candidates.count) attemptedCount=\(result.attemptedCount)")
+        for c in result.candidates { print("candidate \(c.source) \(c.scheme)://\(c.address) hasToken=\(c.token != nil)") }
+        if let c = result.winner { print("winner \(c.source) \(c.scheme)://\(c.address)") }
+        if let reason = result.failureReason { print(reason) }
+        if let notice { print(notice) }
+        for card in cards {
+            // Only expose known model labels in diagnostics.
+            let title = ["Gemini", "Gemini 4 Argon", "Claude / GPT"].contains(card.title) ? card.title : "Antigravity"
+            let windows = [card.shortWindow, card.weeklyWindow].compactMap { $0 }.map { "\($0.label) \($0.remainingInt)% \($0.countdownText)" }
+            print(([title] + windows).joined(separator: " | "))
+        }
+        print("Gemini 5h=\(short.map(String.init) ?? "--")% 7d=\(week.map(String.init) ?? "--")% Codex available=\(codex.isAvailable)")
+        return result.succeeded
     }
 
     // 1. Codex from ~/.codex/sessions/
@@ -544,7 +635,7 @@ final class QuotaStore: ObservableObject {
     }
 
     // 2. Antigravity Model Groups from quota_summary_cache.json
-    private func scanAntigravityQuotaCache() -> ([QuotaCardModel], Int?, Int?) {
+    private func scanAntigravityQuotaCache(isLive: Bool, failureReason: String?) -> ([QuotaCardModel], Int?, Int?, String?) {
         let cachePath = "\(Self.appCacheDirectory)/quota_summary_cache.json"
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: cachePath)),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -554,56 +645,47 @@ final class QuotaStore: ObservableObject {
                 QuotaCardModel(
                     id: "ag-empty", title: "Antigravity",
                     shortWindow: nil, weeklyWindow: nil,
-                    errorMessage: "正在等待 Antigravity 同步模型额度…", isAvailable: false
+                    errorMessage: failureReason ?? "正在等待 Antigravity 同步模型额度…", isAvailable: false
                 )
-            ], nil, nil)
+            ], nil, nil, nil)
         }
 
         var cards: [QuotaCardModel] = []
         var gmShort: Int? = nil
         var gmWeek: Int? = nil
 
+        let updated = parseQuotaTimestamp(root["updatedAt"])
+        let now = Date()
         for (idx, g) in groups.enumerated() {
             let rawName = (g["displayName"] as? String) ?? "Antigravity Models"
+            let buckets = (g["buckets"] as? [[String: Any]] ?? []).filter { $0["disabled"] as? Bool != true }
+            let identity = ([rawName] + buckets.compactMap { $0["bucketId"] as? String }).joined(separator: " ").lowercased()
             let title: String
-            if rawName == "Gemini Models" {
-                title = "Gemini 模型"
-            } else if rawName == "Claude and GPT models" {
-                title = "Claude / GPT 模型"
-            } else if rawName == "Gemini 4 Argon" {
-                title = "Gemini 4 Argon"
-            } else {
-                title = rawName
-            }
+            if identity.contains("argon") { title = "Gemini 4 Argon" }
+            else if identity.range(of: #"claude|gpt|\b3p\b"#, options: .regularExpression) != nil { title = "Claude / GPT" }
+            else if identity.contains("gemini") { title = "Gemini" }
+            else { title = rawName }
 
-            let buckets = (g["buckets"] as? [[String: Any]]) ?? []
-            var shortW: QuotaWindowStat? = nil
-            var weekW: QuotaWindowStat? = nil
-
+            var shortW: QuotaWindowStat?
+            var weekW: QuotaWindowStat?
             for b in buckets {
-                let win = (b["window"] as? String) ?? ""
-                let frac = (b["remainingFraction"] as? NSNumber)?.doubleValue ?? 0.0
-                let remInt = max(0, min(100, Int((frac * 100.0).rounded())))
-                let resetDate = parseISO(b["resetTime"] as? String)
-
-                if win == "5h" {
-                    shortW = QuotaWindowStat(
-                        label: "5h 短窗",
-                        remainingInt: remInt,
-                        resetsAt: resetDate,
-                        countdownText: fmtCountdown(resetDate)
-                    )
-                } else if win == "weekly" {
-                    weekW = QuotaWindowStat(
-                        label: "7 天周窗",
-                        remainingInt: remInt,
-                        resetsAt: resetDate,
-                        countdownText: fmtCountdown(resetDate)
-                    )
+                guard let fraction = parseRemainingFraction(b) else { continue }
+                let win = ["window", "bucketId"].compactMap { b[$0] as? String }.joined(separator: " ").lowercased()
+                let weekly = win.contains("week") || win.contains("7d")
+                guard weekly || win.contains("5h") || win.contains("five") else { continue }
+                let rem = Int((fraction * 100).rounded())
+                let reset = parseQuotaTimestamp(b["resetTime"])
+                var stat = QuotaWindowStat(label: weekly ? "7 天周窗" : "5h 短窗", remainingInt: rem,
+                    resetsAt: reset, countdownText: rem == 100 && reset == nil ? "未使用（满额）" : fmtCountdown(reset))
+                if !isLive, let reset, now >= reset, rem < 100, updated.map({ $0 < reset }) ?? true {
+                    stat.remainingInt = 100
+                    stat.resetsAt = nil
+                    stat.countdownText = "已过重置时间（按缓存推算已满）"
                 }
+                if weekly { weekW = stat } else { shortW = stat }
             }
-
-            if rawName == "Gemini Models" {
+            guard shortW != nil || weekW != nil else { continue }
+            if title == "Gemini" {
                 gmShort = shortW?.remainingInt
                 gmWeek = weekW?.remainingInt
             }
@@ -620,7 +702,12 @@ final class QuotaStore: ObservableObject {
             )
         }
 
-        return (cards, gmShort, gmWeek)
+        if cards.isEmpty {
+            cards.append(QuotaCardModel(id: "ag-empty", title: "Antigravity", shortWindow: nil, weeklyWindow: nil,
+                errorMessage: failureReason ?? "暂无可用模型额度", isAvailable: false))
+        }
+        let notice = "Antigravity 离线，显示缓存" + (updated.map { "（更新于 \(fmtClockTime($0))）" } ?? "")
+        return (cards, gmShort, gmWeek, isLive ? nil : notice)
     }
 }
 
@@ -660,117 +747,84 @@ struct WindowDragArea: NSViewRepresentable {
 
 // MARK: - SwiftUI Views
 
-struct QuotaWindowRowView: View {
-    let defaultLabel: String
-    let stat: QuotaWindowStat?
-    let palette: ThemePalette
+struct VisualEffectBackground: NSViewRepresentable {
+    let isDark: Bool
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(stat?.label ?? defaultLabel)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundColor(palette.secondaryText)
-                Spacer()
-                if let s = stat {
-                    HStack(spacing: 5) {
-                        Text("剩余 \(s.remainingInt)%")
-                            .font(.system(size: 13.5, weight: .bold))
-                            .foregroundColor(palette.statusColor(usedInt: s.usedInt))
-                            .monospacedDigit()
-                        Text("已用 \(s.usedInt)%")
-                            .font(.system(size: 10.5, weight: .medium))
-                            .foregroundColor(palette.mutedText)
-                            .monospacedDigit()
-                    }
-                } else {
-                    Text("剩余 ∞（无限制）")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(palette.okColor)
-                }
-            }
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.blendingMode = .behindWindow
+        view.state = .active
+        return view
+    }
 
-            if let s = stat {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(palette.trackBg)
-                        Capsule()
-                            .fill(palette.statusColor(usedInt: s.usedInt))
-                            .frame(width: max(6, geo.size.width * CGFloat(Double(s.remainingInt) / 100.0)))
-                    }
-                }
-                .frame(height: 8)
-
-                HStack {
-                    HStack(spacing: 3) {
-                        Image(systemName: "clock")
-                            .font(.system(size: 9.5))
-                        Text(s.countdownText)
-                            .font(.system(size: 10.5, weight: .medium))
-                    }
-                    .foregroundColor(palette.secondaryText)
-                    Spacer()
-                    if s.isDanger {
-                        Text("已用 >80%")
-                            .font(.system(size: 10, weight: .bold))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1.5)
-                            .background(palette.dangerColor.opacity(0.18))
-                            .foregroundColor(palette.dangerColor)
-                            .cornerRadius(4)
-                    }
-                }
-            }
-        }
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {
+        view.material = isDark ? .hudWindow : .popover
+        view.appearance = NSAppearance(named: isDark ? .darkAqua : .aqua)
     }
 }
 
-struct QuotaCardView: View {
+private struct LedgerQuotaSection: View {
     let card: QuotaCardModel
     let palette: ThemePalette
 
-    private var accentColor: Color {
-        guard card.isAvailable else { return palette.mutedText }
-        return palette.statusColor(usedInt: card.maxUsedInt)
+    private var color: Color {
+        card.isAvailable ? palette.statusColor(usedInt: card.maxUsedInt) : palette.mutedText
+    }
+
+    private func meter(_ label: String, _ stat: QuotaWindowStat?) -> some View {
+        let tint = stat.map { palette.statusColor(usedInt: $0.usedInt) } ?? palette.okColor
+        return HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 11)).foregroundColor(palette.secondaryText)
+                .frame(width: 52, alignment: .leading)
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(palette.trackBg)
+                    if let stat {
+                        Capsule().fill(tint)
+                            .frame(width: stat.remainingInt > 0 ? max(4, geometry.size.width * CGFloat(stat.remainingInt) / 100) : 0)
+                    } else {
+                        Capsule().fill(tint.opacity(0.48))
+                    }
+                }
+            }.frame(height: 4.5)
+            Text(stat.map { "\($0.remainingInt)%" } ?? "∞")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundColor(tint).frame(width: 42, alignment: .trailing)
+        }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 7) {
-                Circle()
-                    .fill(accentColor)
-                    .frame(width: 8, height: 8)
-                Text(card.title)
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundColor(palette.primaryText)
-                    .lineLimit(1)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(card.title).font(.system(size: 12.5, weight: .semibold)).foregroundColor(palette.primaryText)
                 Spacer()
+                if card.isAvailable && card.maxUsedInt >= 60 {
+                    Text(card.maxUsedInt > 80 ? "已用 \(card.maxUsedInt)%" : "预警")
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .foregroundColor(color).padding(.horizontal, 6).padding(.vertical, 1.5)
+                        .background(color.opacity(0.14), in: Capsule())
+                }
             }
-
             if card.isAvailable {
-                QuotaWindowRowView(defaultLabel: "5h 短窗", stat: card.shortWindow, palette: palette)
-                Rectangle()
-                    .fill(palette.divider)
-                    .frame(height: 1)
-                QuotaWindowRowView(defaultLabel: "7 天周窗", stat: card.weeklyWindow, palette: palette)
+                meter("5h 短窗", card.shortWindow).padding(.top, 7)
+                meter("7 天周窗", card.weeklyWindow).padding(.top, 7)
+                HStack {
+                    Text("5h \(card.shortWindow?.countdownText ?? "无限制")")
+                    Spacer(minLength: 8)
+                    Text("7d \(card.weeklyWindow?.countdownText ?? "无限制")")
+                }
+                .font(.system(size: 10, design: .monospaced)).foregroundColor(palette.mutedText)
+                .lineLimit(1).minimumScaleFactor(0.85).padding(.top, 2)
             } else {
                 Text(card.errorMessage ?? "暂无额度数据")
-                    .font(.system(size: 11.5))
-                    .foregroundColor(palette.secondaryText)
+                    .font(.system(size: 11)).foregroundColor(palette.secondaryText).padding(.top, 7)
             }
         }
-        .padding(11)
-        .background(palette.cardBg)
-        .overlay(
-            RoundedRectangle(cornerRadius: 11)
-                .stroke(
-                    card.isAvailable && card.maxUsedInt > 80
-                        ? palette.dangerColor.opacity(0.75)
-                        : palette.cardBorder,
-                    lineWidth: card.isAvailable && card.maxUsedInt > 80 ? 1.5 : 1
-                )
-        )
-        .cornerRadius(11)
+        .padding(.vertical, 11).padding(.leading, 17).padding(.trailing, 14)
+        .overlay(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 1.5).fill(color).frame(width: 3).padding(.vertical, 10)
+        }
     }
 }
 
@@ -778,104 +832,85 @@ struct DashboardView: View {
     @ObservedObject var store: QuotaStore
     let hideWindow: () -> Void
     let quitApp: () -> Void
+    var snapshot = false
 
-    private var palette: ThemePalette {
-        ThemePalette(isDark: store.isDarkTheme)
+    private var palette: ThemePalette { ThemePalette(isDark: store.isDarkTheme) }
+    private var hasQuota: Bool { store.antigravityCards.contains(where: { $0.isAvailable }) }
+    @ViewBuilder private var dragArea: some View {
+        if !snapshot { WindowDragArea() }
+    }
+
+    private func iconButton(_ symbol: String, _ label: String,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 11.5, weight: .semibold))
+                .foregroundColor(palette.secondaryText)
+                .frame(width: 24, height: 24)
+                .background(palette.chipBg,
+                            in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).help(label).accessibilityLabel(label)
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: "gauge.with.dots.needle.67percent")
+                    .font(.system(size: 13.5, weight: .semibold)).foregroundColor(palette.okColor)
+                Text("Apollo AgentMeter").font(.system(size: 13, weight: .semibold)).foregroundColor(palette.primaryText)
+                Circle().fill(hasQuota ? (store.antigravityStaleNotice == nil ? palette.okColor : palette.warnColor) : palette.mutedText)
+                    .frame(width: 6, height: 6)
+                Spacer()
+            }.overlay { dragArea }
+            iconButton("arrow.clockwise", "手动立即刷新", action: store.refreshAll)
+                .opacity(store.isRefreshing ? 0.55 : 1)
+            iconButton(store.isDarkTheme ? "sun.max.fill" : "moon.fill", "切换深浅色主题") { store.isDarkTheme.toggle() }
+            iconButton("minus", "收起到状态栏", action: hideWindow)
+            iconButton("power", "退出 AgentMeter", action: quitApp)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 11)
+        .background { dragArea }
     }
 
     var body: some View {
-        ZStack {
-            // Full-window background drag layer so clicking/dragging any blank area moves the window
-            WindowDragArea()
-
-            VStack(alignment: .leading, spacing: 9) {
-                HStack(spacing: 7) {
+        let shape = RoundedRectangle(cornerRadius: 13)
+        VStack(spacing: 0) {
+            topBar
+            palette.hairline.frame(height: 1)
+            VStack(spacing: 0) {
+                if let notice = store.antigravityStaleNotice, hasQuota {
                     HStack(spacing: 6) {
-                        Image(systemName: "gauge.with.dots.needle.67percent")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(palette.accentBlue)
-                        Text("Apollo AgentMeter")
-                            .font(.system(size: 14.5, weight: .bold))
-                            .foregroundColor(palette.primaryText)
+                        Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10))
+                        Text(notice).font(.system(size: 10.5))
                     }
-                    .overlay(WindowDragArea())
-
-                    Spacer()
-                        .overlay(WindowDragArea())
-
-                    Button(action: { store.isDarkTheme.toggle() }) {
-                        Image(systemName: store.isDarkTheme ? "sun.max.fill" : "moon.fill")
-                            .font(.system(size: 11.5))
-                            .foregroundColor(palette.secondaryText)
-                            .padding(5)
-                            .background(palette.chipBg)
-                            .cornerRadius(6)
-                    }
-                    .buttonStyle(.plain)
-                    .help("切换深浅色主题")
-
-                    Button(action: { store.refreshAll() }) {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundColor(store.isRefreshing ? palette.accentBlue : palette.secondaryText)
-                            .padding(5)
-                            .background(palette.chipBg)
-                            .cornerRadius(6)
-                    }
-                    .buttonStyle(.plain)
-                    .help("手动立即刷新")
-
-                    Button(action: hideWindow) {
-                        Image(systemName: "minus")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundColor(palette.secondaryText)
-                            .padding(5)
-                            .background(palette.chipBg)
-                            .cornerRadius(6)
-                    }
-                    .buttonStyle(.plain)
-                    .help("收起到状态栏")
-
-                    Button(action: quitApp) {
-                        Image(systemName: "power")
-                            .font(.system(size: 11.5))
-                            .foregroundColor(palette.secondaryText)
-                            .padding(5)
-                            .background(palette.chipBg)
-                            .cornerRadius(6)
-                    }
-                    .buttonStyle(.plain)
-                    .help("退出 Apollo AgentMeter")
+                    .foregroundColor(palette.warnColor).frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14).padding(.vertical, 7).background(palette.warnColor.opacity(0.13))
+                    palette.hairline.frame(height: 1)
                 }
-
-                QuotaCardView(card: store.codexCard, palette: palette)
-                    .overlay(WindowDragArea())
-
-                ForEach(store.antigravityCards) { card in
-                    QuotaCardView(card: card, palette: palette)
-                        .overlay(WindowDragArea())
+                ForEach([store.codexCard] + store.antigravityCards) { card in
+                    LedgerQuotaSection(card: card, palette: palette)
+                    palette.hairline.frame(height: 1)
                 }
-
                 HStack {
-                    Text("上次刷新 \(fmtClockTime(store.lastRefresh)) · 每 5 分钟自动刷新")
-                        .font(.system(size: 10.5))
-                        .foregroundColor(palette.mutedText)
+                    Text("刷新 \(fmtClockTime(store.lastRefresh)) · 5分钟自动").font(.system(size: 10, design: .monospaced))
                     Spacer()
-                    Text("按住任意处可拖动")
-                        .font(.system(size: 10.5))
-                        .foregroundColor(palette.mutedText)
-                }
-                .overlay(WindowDragArea())
-            }
-            .padding(14)
+                    Text("按住任意处拖动").font(.system(size: 10))
+                }.foregroundColor(palette.mutedText).padding(.horizontal, 14).padding(.vertical, 9)
+            }.overlay { dragArea }
         }
-        .frame(width: 344)
-        .background(palette.windowBg)
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(palette.cardBorder, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .frame(width: 356)
+        .background {
+            if snapshot {
+                palette.snapshotBg
+            } else {
+                ZStack {
+                    VisualEffectBackground(isDark: store.isDarkTheme)
+                    palette.hudTint
+                }
+            }
+        }
+        .clipShape(shape)
+        .overlay { shape.strokeBorder(palette.hairline, lineWidth: 1).allowsHitTesting(false) }
     }
 }
 
@@ -965,12 +1000,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.layoutSubtreeIfNeeded()
         let newSize = view.fittingSize
         let oldFrame = panel.frame
-        if abs(oldFrame.height - newSize.height) > 2 {
+        if abs(oldFrame.width - newSize.width) > 2 || abs(oldFrame.height - newSize.height) > 2 {
             let visible = (panel.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
                 ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
             var newY = oldFrame.maxY - newSize.height
             newY = min(max(newY, visible.minY + 8), visible.maxY - newSize.height - 8)
-            panel.setFrame(NSRect(x: oldFrame.origin.x, y: newY, width: newSize.width, height: newSize.height), display: true)
+            let newX = min(max(oldFrame.maxX - newSize.width, visible.minX + 8), visible.maxX - newSize.width - 8)
+            panel.setFrame(NSRect(x: newX, y: newY, width: newSize.width, height: newSize.height), display: true)
         }
     }
 
@@ -1048,6 +1084,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         floatingPanel?.orderFrontRegardless()
         resizePanelIfNeeded()
     }
+}
+
+if CommandLine.arguments.contains("--probe") {
+    exit(QuotaStore(startTimers: false).probe() ? 0 : 1)
+}
+
+@MainActor
+private func writeSnapshots(store: QuotaStore, directory: URL) throws {
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    for dark in [true, false] {
+        store.isDarkTheme = dark
+        let renderer = ImageRenderer(content: DashboardView(store: store, hideWindow: {}, quitApp: {}, snapshot: true))
+        renderer.scale = 2
+        guard let image = renderer.cgImage,
+              let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let destination = directory.appendingPathComponent(dark ? "dark.png" : "light.png")
+        try png.write(to: destination, options: .atomic)
+        print(destination.path)
+    }
+}
+
+if let index = CommandLine.arguments.firstIndex(of: "--snapshot") {
+    let path = CommandLine.arguments.dropFirst(index + 1).first ?? ".apollo-ui/agentmeter-redesign/shots"
+    let directory = URL(fileURLWithPath: path, isDirectory: true)
+    _ = NSApplication.shared
+    let store = QuotaStore(startTimers: false)
+    store.onUpdate = {
+        Task { @MainActor in
+            do {
+                try writeSnapshots(store: store, directory: directory)
+                exit(0)
+            } catch {
+                fputs("无法写入面板截图。\n", stderr)
+                exit(1)
+            }
+        }
+    }
+    store.refreshAll()
+    RunLoop.main.run()
+    exit(1)
 }
 
 let app = NSApplication.shared
